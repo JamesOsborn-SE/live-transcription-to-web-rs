@@ -29,12 +29,13 @@ wget https://huggingface.co/csukuangfj/sherpa-onnx-nemotron-speech-streaming-en-
 wget https://huggingface.co/csukuangfj/sherpa-onnx-nemotron-speech-streaming-en-0.6b-int8-2026-01-14/resolve/main/decoder.int8.onnx
 wget https://huggingface.co/csukuangfj/sherpa-onnx-nemotron-speech-streaming-en-0.6b-int8-2026-01-14/resolve/main/joiner.int8.onnx
 wget https://huggingface.co/csukuangfj/sherpa-onnx-nemotron-speech-streaming-en-0.6b-int8-2026-01-14/resolve/main/tokens.txt
+cd ..
 ```
 
-## run
+## Run optimized
 
 ```shell
-cargo run
+cargo run --release
 ```
 
 replace with ip of device find ip: `ip addr`
@@ -44,6 +45,7 @@ replace with ip of device find ip: `ip addr`
 
 ### Code
 
+- use grpc?
 - read model config from file
 - retry if no mic found
 - exit if model isn't loaded
