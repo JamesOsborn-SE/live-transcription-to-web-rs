@@ -160,7 +160,6 @@ fn run_inference_loop(
 
             // If the model detects a pause in speech, finalize the sentence
             if is_endpoint {
-                print!("pause detected");
                 if !active_text.is_empty() {
                     completed_text.push_str(&active_text);
                     completed_text.push_str("\n");
