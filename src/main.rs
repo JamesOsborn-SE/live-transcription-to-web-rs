@@ -10,7 +10,7 @@ use axum::{
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use futures::stream::Stream;
 use rtrb::{Consumer, Producer, RingBuffer};
-use sherpa_onnx::{OnlineRecognizer, OnlineRecognizerConfig};
+use parakeet_rs::Nemotron;
 use std::{convert::Infallible, time::Duration};
 use tokio::sync::broadcast;
 use tokio_stream::StreamExt;
@@ -21,6 +21,7 @@ use tower_http::cors::CorsLayer;
 const SAMPLE_RATE: u32 = 16000;
 const CHANNELS: u16 = 1;
 const RING_BUFFER_SIZE: usize = SAMPLE_RATE as usize * 10;
+const CHUNK_SIZE: usize = 8960; // 560ms at 16kHz (Standard chunk size for Nemotron streaming)
 
 // Shared state for Axum Web Server
 #[derive(Clone)]
@@ -35,7 +36,7 @@ async fn index_handler() -> Html<&'static str> {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt::init();
-    tracing::info!("Starting Live Transcriber (Sherpa-ONNX)...");
+    tracing::info!("Starting Live Transcriber (Parakeet-RS)...");
 
     // 1. Initialize Broadcast Channel
     let (tx, _rx) = broadcast::channel::<String>(16);
@@ -108,93 +109,103 @@ fn start_audio_stream(
     Ok(stream)
 }
 
-/// Dedicated blocking loop for Sherpa-ONNX processing
+fn calculate_rms(samples: &[f32]) -> f32 {
+    let sq_sum: f32 = samples.iter().map(|&s| s * s).sum();
+    if samples.is_empty() {
+        return 0.0;
+    }
+    (sq_sum / samples.len() as f32).sqrt()
+}
+
+/// Dedicated blocking loop for Parakeet-RS processing
 fn run_inference_loop(
     mut consumer: Consumer<f32>,
     tx: broadcast::Sender<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut config = OnlineRecognizerConfig::default();
-    config.model_config.provider = Some("openvino".to_string());
+    tracing::info!("Initializing Parakeet-RS Nemotron Engine...");
 
-    config.model_config.model_type = Some("transducer".to_string());
-    config.model_config.transducer.encoder = Some("model/encoder.int8.onnx".to_string());
-    config.model_config.transducer.decoder = Some("model/decoder.int8.onnx".to_string());
-    config.model_config.transducer.joiner = Some("model/joiner.int8.onnx".to_string());
-    // config.model_config.transducer.encoder = Some("model/encoder.onnx".to_string());
-    // config.model_config.transducer.decoder = Some("model/decoder.onnx".to_string());
-    // config.model_config.transducer.joiner = Some("model/joiner.onnx".to_string());
-    config.model_config.tokens = Some("model/tokens.txt".to_string());
-    config.model_config.nemo_ctc.model = None;
+    let mut model = Nemotron::from_pretrained("./nemotron", None)?;
 
-    config.enable_endpoint = true;
-
-    tracing::info!("Initializing Sherpa-ONNX Engine...");
-    let recognizer =
-        OnlineRecognizer::create(&config).ok_or("Failed to create OnlineRecognizer")?;
-    let mut stream = recognizer.create_stream();
-
-    let chunk_size = (SAMPLE_RATE / 10) as usize;
-    let mut audio_buffer = Vec::with_capacity(chunk_size);
-
-    let mut last_active = String::new();
+    let mut audio_buffer = Vec::with_capacity(CHUNK_SIZE * 2);
     let mut completed_text = String::new();
 
+    // --- Silence Detection State ---
+    let mut silent_chunks = 0;
+    let mut needs_newline = false;
+    const SILENCE_THRESHOLD: f32 = 0.01; // Tune this: lower = more sensitive to background noise
+    const CHUNKS_FOR_NEWLINE: usize = 2; // ~1.1 seconds of silence (2 * 560ms)
+
     loop {
+        // Drain available samples into the buffer
         while let Ok(sample) = consumer.pop() {
             audio_buffer.push(sample);
         }
 
-        if audio_buffer.len() >= chunk_size {
-            stream.accept_waveform(SAMPLE_RATE as i32, &audio_buffer);
-            audio_buffer.clear();
+        // Process exactly CHUNK_SIZE samples at a time
+        if audio_buffer.len() >= CHUNK_SIZE {
+            let chunk: Vec<f32> = audio_buffer.drain(..CHUNK_SIZE).collect();
 
-            while recognizer.is_ready(&mut stream) {
-                recognizer.decode(&mut stream);
-            }
-
-            let result = recognizer.get_result(&mut stream).unwrap();
-            let is_endpoint = recognizer.is_endpoint(&mut stream);
-
-            let mut active_text = result.text.clone();
-            let mut state_changed = false;
-
-            // If the model detects a pause in speech, finalize the sentence
-            if is_endpoint {
-                if !active_text.is_empty() {
-                    completed_text.push_str(&active_text);
-                    completed_text.push_str("\n");
-                    state_changed = true;
+            // Check audio volume to detect pauses
+            let rms = calculate_rms(&chunk);
+            if rms < SILENCE_THRESHOLD {
+                silent_chunks += 1;
+                if silent_chunks >= CHUNKS_FOR_NEWLINE {
+                    needs_newline = true;
                 }
-                // Clear the active text since the sentence is finished
-                active_text.clear();
-                recognizer.reset(&mut stream);
+            } else {
+                silent_chunks = 0; // Reset if speech is detected
             }
 
-            // Flag if the live transcription changed
-            if active_text != last_active {
-                state_changed = true;
-            }
+            // Perform cache-aware transcription on the chunk
+            if let Ok(text) = model.transcribe_chunk(&chunk) {
+                if !text.is_empty() {
+                    
+                    if needs_newline {
+                        // Check if the new chunk actually contains words, or just leftover punctuation/spaces
+                        let has_alphanumeric = text.chars().any(|c| c.is_alphanumeric());
+                        
+                        if !has_alphanumeric {
+                            // It's JUST leftover punctuation (e.g. "." or " ?"). 
+                            // Attach it to the previous line and KEEP the newline pending for the next actual word.
+                            completed_text.push_str(&text);
+                        } else {
+                            // The chunk contains words, but might start with punctuation (e.g. ". How are you")
+                            // Let's split off any leading punctuation/spaces
+                            let first_alpha_idx = text.find(|c: char| c.is_alphanumeric()).unwrap();
+                            let (leading_punc, rest) = text.split_at(first_alpha_idx);
+                            
+                            // Attach the lingering punctuation to the previous line
+                            completed_text.push_str(leading_punc);
+                            
+                            // Insert the paragraph break (but avoid doing it at the very start of the doc)
+                            if !completed_text.trim().is_empty() && !completed_text.ends_with("\n\n") {
+                                completed_text.push_str("\n");
+                            }
+                            
+                            // Append the actual words
+                            completed_text.push_str(rest);
+                            needs_newline = false; // We successfully inserted the newline
+                        }
+                    } else {
+                        completed_text.push_str(&text);
+                    }
 
-            // If either active or completed text changed, broadcast the new state
-            if state_changed {
-                // Package the state as a JSON string
-                let payload = serde_json::json!({
-                    "completed": completed_text,
-                    "active": active_text
-                })
-                .to_string();
+                    let payload = serde_json::json!({
+                        "completed": completed_text,
+                    })
+                    .to_string();
 
-                if tx.receiver_count() > 0 {
-                    let _ = tx.send(payload);
+                    if tx.receiver_count() > 0 {
+                        let _ = tx.send(payload);
+                    }
                 }
-                last_active = active_text;
             }
         } else {
+            // Sleep briefly to avoid busy-waiting
             std::thread::sleep(Duration::from_millis(10));
         }
     }
 }
-
 /// Axum handler to establish SSE connections
 async fn sse_handler(
     State(state): State<AppState>,

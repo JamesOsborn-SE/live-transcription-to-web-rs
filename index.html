@@ -13,26 +13,13 @@
             display: flex;
             flex-direction: column;
             height: 90vh;
-            overflow: hidden; /* Prevent the main body from scrolling */
+            overflow: hidden;
         }
 
         h2 { color: #ffffff; margin-bottom: 1rem; }
-        
-        #active-box { 
-            font-size: 1.5rem; 
-            color: #66b2ff; 
-            background-color: #1e2a38; 
-            border: 2px solid #3a5a78; 
-            border-radius: 8px;
-            padding: 1.5rem;
-            min-height: 2.5rem;
-            margin-bottom: 1rem;
-            flex-shrink: 0;
-            box-shadow: 0 4px 10px rgba(0,0,0,0.3);
-        }
 
         .controls {
-            margin-bottom: 0.5rem;
+            margin-bottom: 1rem;
             display: flex;
             align-items: center;
             gap: 0.5rem;
@@ -42,8 +29,8 @@
 
         /* Scrollable container for history */
         #completed-box { 
-            font-size: 1.25rem; 
-            color: #b0b0b0; 
+            font-size: 1.5rem; /* Bumped up size since active-box is gone */
+            color: #e0e0e0; 
             white-space: pre-wrap; 
             padding: 1.5rem;
             line-height: 1.6;
@@ -51,48 +38,33 @@
             border: 1px solid #333;
             border-radius: 8px;
             overflow-y: auto;
-            flex-grow: 1; /* Fills the rest of the screen */
+            flex-grow: 1; 
         }
-
-        .placeholder { color: #888; font-style: italic; }
 
         /* Subtle scrollbar styling for Dark Mode */
-        #completed-box::-webkit-scrollbar {
-            width: 8px;
-        }
-        #completed-box::-webkit-scrollbar-track {
-            background: #121212;
-        }
-        #completed-box::-webkit-scrollbar-thumb {
-            background: #444;
-            border-radius: 4px;
-        }
-        #completed-box::-webkit-scrollbar-thumb:hover {
-            background: #555;
-        }
+        #completed-box::-webkit-scrollbar { width: 8px; }
+        #completed-box::-webkit-scrollbar-track { background: #121212; }
+        #completed-box::-webkit-scrollbar-thumb { background: #444; border-radius: 4px; }
+        #completed-box::-webkit-scrollbar-thumb:hover { background: #555; }
     </style>
 </head>
 <body>
     <h2>Live Transcription</h2>
     
-    <div id="active-box">
-        <span class="placeholder">Awaiting speech...</span>
-    </div>
-
     <div class="controls">
         <input type="checkbox" id="autoscroll-toggle" checked>
-        <label for="autoscroll-toggle">Auto-scroll to bottom on update</label>
+        <label for="autoscroll-toggle">Auto-scroll to bottom</label>
     </div>
     
-    <div id="completed-box"></div>
+    <div id="completed-box">Awaiting speech...</div>
 
     <script>
-        const activeBox = document.getElementById("active-box");
         const completedBox = document.getElementById("completed-box");
         const scrollToggle = document.getElementById("autoscroll-toggle");
         
         let evtSource = null;
         let reconnectTimeout = null;
+        let isFirstMessage = true;
 
         function connect() {
             if (evtSource) {
@@ -104,18 +76,17 @@
             evtSource.onmessage = function(event) {
                 const data = JSON.parse(event.data);
                 
-                // Update Active Transcription
-                if (data.active.trim() === "") {
-                    activeBox.innerHTML = '<span class="placeholder">Listening...</span>';
-                } else {
-                    activeBox.innerText = data.active;
+                // Clear the "Awaiting speech..." placeholder on first real data
+                if (isFirstMessage) {
+                    completedBox.innerText = "";
+                    isFirstMessage = false;
                 }
 
                 // Update Historical Text
                 const previousContent = completedBox.innerText;
                 completedBox.innerText = data.completed;
 
-                // Auto-scroll logic: only if enabled and content actually changed
+                // Auto-scroll logic
                 if (scrollToggle.checked && previousContent !== data.completed) {
                     completedBox.scrollTop = completedBox.scrollHeight;
                 }
@@ -123,15 +94,12 @@
 
             evtSource.onerror = function() {
                 console.warn("Connection lost. Retrying in 1s...");
-                activeBox.innerHTML = '<span class="placeholder" style="color: #ff6b6b;">Connection lost. Reconnecting...</span>';
-                
                 evtSource.close(); 
                 clearTimeout(reconnectTimeout);
                 reconnectTimeout = setTimeout(connect, 1000);
             };
         }
 
-        // Initial connection
         connect();
     </script>
 </body>
