@@ -135,8 +135,8 @@ fn run_inference_loop(
     // --- Silence Detection State ---
     let mut silent_chunks = 0;
     let mut needs_newline = false;
-    const SILENCE_THRESHOLD: f32 = 0.01; // Tune this: lower = more sensitive to background noise
-    const CHUNKS_FOR_NEWLINE: usize = 2; // ~1.1 seconds of silence (2 * 560ms)
+    const SILENCE_THRESHOLD: f32 = 0.05; // Tune this: lower = more sensitive to background noise
+    const CHUNKS_FOR_NEWLINE: usize = 1; // ~1.1 seconds of silence (2 * 560ms)
 
     loop {
         // Drain available samples into the buffer
@@ -162,7 +162,6 @@ fn run_inference_loop(
             // Perform cache-aware transcription on the chunk
             if let Ok(text) = model.transcribe_chunk(&chunk) {
                 if !text.is_empty() {
-                    
                     if needs_newline {
                         // Check if the new chunk actually contains words, or just leftover punctuation/spaces
                         let has_alphanumeric = text.chars().any(|c| c.is_alphanumeric());
