@@ -10,7 +10,7 @@ use axum::{
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use futures::stream::Stream;
 use rtrb::{Consumer, Producer, RingBuffer};
-use parakeet_rs::Nemotron;
+use parakeet_rs::{ExecutionProvider, Nemotron, ExecutionConfig};
 use std::{convert::Infallible, time::Duration};
 use tokio::sync::broadcast;
 use tokio_stream::StreamExt;
@@ -124,7 +124,10 @@ fn run_inference_loop(
 ) -> Result<(), Box<dyn std::error::Error>> {
     tracing::info!("Initializing Parakeet-RS Nemotron Engine...");
 
-    let mut model = Nemotron::from_pretrained("./nemotron", None)?;
+    let config = ExecutionConfig::new()
+        .with_execution_provider(ExecutionProvider::OpenVINO);
+
+    let mut model = Nemotron::from_pretrained("./nemotron", Some(config))?;
 
     let mut audio_buffer = Vec::with_capacity(CHUNK_SIZE * 2);
     let mut completed_text = String::new();
