@@ -24,7 +24,7 @@ RUN apt-get update && apt-get install -y \
 WORKDIR /app
 
 # Copy the compiled binary from the builder stage
-COPY --from=builder /usr/src/app/target/release/live-transcription-to-web-rs /app/live-transcription
+COPY --from=builder /usr/src/app/target/release /app/live-transcription
 
 # Copy your web assets if they aren't embedded into the binary
 COPY ./index.html /app/index.html 
