@@ -16,6 +16,7 @@ use tokio::sync::broadcast;
 use tokio_stream::StreamExt;
 use tokio_stream::wrappers::BroadcastStream;
 use tower_http::cors::CorsLayer;
+use ort::ep::{OpenVINO, ArbitrarilyConfigurableExecutionProvider};
 
 // --- Configuration Constants ---
 const SAMPLE_RATE: u32 = 16000;
@@ -125,10 +126,20 @@ fn run_inference_loop(
     tracing::info!("Initializing Parakeet-RS Nemotron Engine...");
 
     let config = ExecutionConfig::new()
-        .with_execution_provider(ExecutionProvider::OpenVINO);
+    .with_custom_configure(|builder| {
+        let ov_ep = OpenVINO::default()
+            .with_device_type("AUTO") 
+            .with_dynamic_shapes(false)
+            .build();
 
-    let model_path = std::env::current_dir()?.join("nemotron");
-    let mut model = Nemotron::from_pretrained(model_path, Some(config))?;
+        let configured_builder = builder.with_execution_providers([ov_ep])?;
+        
+        // 2. Return the successfully configured builder wrapped in Ok()
+        Ok(configured_builder)
+    })
+    .with_execution_provider(ExecutionProvider::Cpu);
+
+    let mut model = Nemotron::from_pretrained("./nemotron", Some(config))?;
 
     let mut audio_buffer = Vec::with_capacity(CHUNK_SIZE * 2);
     let mut completed_text = String::new();
