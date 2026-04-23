@@ -9,14 +9,14 @@ use axum::{
 };
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use futures::stream::Stream;
+use ort::ep::OpenVINO;
+use parakeet_rs::{ExecutionConfig, ExecutionProvider, Nemotron};
 use rtrb::{Consumer, Producer, RingBuffer};
-use parakeet_rs::{ExecutionProvider, Nemotron, ExecutionConfig};
 use std::{convert::Infallible, time::Duration};
 use tokio::sync::broadcast;
 use tokio_stream::StreamExt;
 use tokio_stream::wrappers::BroadcastStream;
 use tower_http::cors::CorsLayer;
-use ort::ep::{OpenVINO};
 
 // --- Configuration Constants ---
 const SAMPLE_RATE: u32 = 16000;
@@ -51,10 +51,35 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         run_inference_loop(audio_cons, tx).expect("Inference thread crashed");
     });
 
-    // 4. Start Audio Capture Thread (cpal)
-    let audio_stream = start_audio_stream(audio_prod)?;
-    audio_stream.play()?;
-    tracing::info!("Microphone stream started.");
+    // 4. Start Audio Capture Thread (Isolate CPAL from Tokio!)
+    // We use a channel just to block until the stream is ready, so we don't proceed too fast
+    let (stream_tx, stream_rx) = std::sync::mpsc::channel();
+
+    let _audio_handle = std::thread::spawn(move || {
+        // Start the stream inside this dedicated OS thread
+        match start_audio_stream(audio_prod) {
+            Ok(stream) => {
+                if let Err(e) = stream.play() {
+                    tracing::error!("Failed to play stream: {}", e);
+                } else {
+                    tracing::info!("Microphone stream started on dedicated thread.");
+                    // Tell main thread we succeeded
+                    let _ = stream_tx.send(Ok(stream));
+
+                    // Keep the thread alive so the stream doesn't drop
+                    loop {
+                        std::thread::park();
+                    }
+                }
+            }
+            Err(e) => {
+                let _ = stream_tx.send(Err(e));
+            }
+        }
+    });
+
+    // Wait for the audio thread to successfully initialize
+    let _audio_stream_keepalive = stream_rx.recv().expect("Audio thread died")?;
 
     // 5. Start Network Thread (Tokio + Axum)
     let app = Router::new()
@@ -126,18 +151,18 @@ fn run_inference_loop(
     tracing::info!("Initializing Parakeet-RS Nemotron Engine...");
 
     let config = ExecutionConfig::new()
-    .with_custom_configure(|builder| {
-        let ov_ep = OpenVINO::default()
-            .with_device_type("HETERO:GPU,CPU") 
-            .with_dynamic_shapes(false)
-            .build();
+        .with_custom_configure(|builder| {
+            let ov_ep = OpenVINO::default()
+                .with_device_type("HETERO:GPU,CPU")
+                .with_dynamic_shapes(false)
+                .build();
 
-        let configured_builder = builder.with_execution_providers([ov_ep])?;
-        
-        // 2. Return the successfully configured builder wrapped in Ok()
-        Ok(configured_builder)
-    })
-    .with_execution_provider(ExecutionProvider::Cpu);
+            let configured_builder = builder.with_execution_providers([ov_ep])?;
+
+            // 2. Return the successfully configured builder wrapped in Ok()
+            Ok(configured_builder)
+        })
+        .with_execution_provider(ExecutionProvider::Cpu);
 
     let mut model = Nemotron::from_pretrained("./nemotron", Some(config))?;
 
@@ -177,9 +202,9 @@ fn run_inference_loop(
                     if needs_newline {
                         // Check if the new chunk actually contains words, or just leftover punctuation/spaces
                         let has_alphanumeric = text.chars().any(|c| c.is_alphanumeric());
-                        
+
                         if !has_alphanumeric {
-                            // It's JUST leftover punctuation (e.g. "." or " ?"). 
+                            // It's JUST leftover punctuation (e.g. "." or " ?").
                             // Attach it to the previous line and KEEP the newline pending for the next actual word.
                             completed_text.push_str(&text);
                         } else {
@@ -187,15 +212,17 @@ fn run_inference_loop(
                             // Let's split off any leading punctuation/spaces
                             let first_alpha_idx = text.find(|c: char| c.is_alphanumeric()).unwrap();
                             let (leading_punc, rest) = text.split_at(first_alpha_idx);
-                            
+
                             // Attach the lingering punctuation to the previous line
                             completed_text.push_str(leading_punc);
-                            
+
                             // Insert the paragraph break (but avoid doing it at the very start of the doc)
-                            if !completed_text.trim().is_empty() && !completed_text.ends_with("\n\n") {
+                            if !completed_text.trim().is_empty()
+                                && !completed_text.ends_with("\n\n")
+                            {
                                 completed_text.push_str("\n");
                             }
-                            
+
                             // Append the actual words
                             completed_text.push_str(rest);
                             needs_newline = false; // We successfully inserted the newline
