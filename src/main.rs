@@ -127,7 +127,8 @@ fn run_inference_loop(
     let config = ExecutionConfig::new()
         .with_execution_provider(ExecutionProvider::OpenVINO);
 
-    let mut model = Nemotron::from_pretrained("./nemotron", Some(config))?;
+    let model_path = std::env::current_dir()?.join("nemotron");
+    let mut model = Nemotron::from_pretrained(model_path, Some(config))?;
 
     let mut audio_buffer = Vec::with_capacity(CHUNK_SIZE * 2);
     let mut completed_text = String::new();
