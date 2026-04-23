@@ -56,7 +56,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (stream_tx, stream_rx) = std::sync::mpsc::channel();
 
     let _audio_handle = std::thread::spawn(move || {
-        // Start the stream inside this dedicated OS thread
         match start_audio_stream(audio_prod) {
             Ok(stream) => {
                 if let Err(e) = stream.play() {
@@ -79,7 +78,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
 
     // Wait for the audio thread to successfully initialize
-    let _audio_stream_keepalive = stream_rx.recv().expect("Audio thread died")?;
+    let _audio_stream_keepalive = stream_rx.recv().expect("Audio thread died");
 
     // 5. Start Network Thread (Tokio + Axum)
     let app = Router::new()
@@ -99,8 +98,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    audio_stream.pause()?;
-    drop(audio_stream);
     tracing::info!("Audio stream closed. Exiting.");
 
     Ok(())
@@ -109,7 +106,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// Sets up the CPAL audio capture
 fn start_audio_stream(
     mut producer: Producer<f32>,
-) -> Result<cpal::Stream, Box<dyn std::error::Error>> {
+) -> Result<cpal::Stream, Box<dyn std::error::Error + Send + Sync>> {
     let host = cpal::default_host();
     let device = host.default_input_device().ok_or("No input device found")?;
     tracing::info!("Using input device: {}", device.description()?);
