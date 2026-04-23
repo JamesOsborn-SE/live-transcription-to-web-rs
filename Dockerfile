@@ -1,4 +1,4 @@
-FROM rust:1.77-bullseye AS builder
+FROM rust:trixie AS builder
 
 # Install dependencies required by cpal (ALSA) and OpenSSL/Network stuff
 RUN apt-get update && apt-get install -y \
@@ -13,7 +13,7 @@ COPY . .
 RUN cargo build --release
 
 # --- Stage 2: Runtime ---
-FROM debian:bullseye-slim
+FROM debian:trixie
 
 # Install ALSA runtime libraries
 RUN apt-get update && apt-get install -y \
