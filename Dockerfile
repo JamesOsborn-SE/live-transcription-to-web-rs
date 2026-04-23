@@ -33,4 +33,4 @@ COPY ./index.html /app/index.html
 EXPOSE 3000
 
 # Run the app
-CMD ["./live-transcription"]
+CMD ["./live-transcription/live_transcriber"]
