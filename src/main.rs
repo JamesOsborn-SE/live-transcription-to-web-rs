@@ -128,7 +128,7 @@ fn run_inference_loop(
     let config = ExecutionConfig::new()
     .with_custom_configure(|builder| {
         let ov_ep = OpenVINO::default()
-            .with_device_type("GPU") 
+            .with_device_type("HETERO:GPU,CPU") 
             .with_dynamic_shapes(false)
             .build();
 
