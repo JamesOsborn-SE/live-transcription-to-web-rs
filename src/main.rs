@@ -9,6 +9,7 @@ use axum::{
 };
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use futures::stream::Stream;
+use ort::ep::OpenVINO;
 use parakeet_rs::{ExecutionConfig, ExecutionProvider, Nemotron};
 use rtrb::{Consumer, Producer, RingBuffer};
 use std::{convert::Infallible, time::Duration};
@@ -147,6 +148,17 @@ fn run_inference_loop(
     tracing::info!("Initializing Parakeet-RS Nemotron Engine...");
 
     let config = ExecutionConfig::new()
+        .with_custom_configure(|builder| {
+            let ov_ep = OpenVINO::default()
+                .with_device_type("GPU")
+                .with_dynamic_shapes(false)
+                .build();
+
+            let configured_builder = builder.with_execution_providers([ov_ep])?;
+
+            // 2. Return the successfully configured builder wrapped in Ok()
+            Ok(configured_builder)
+        })
         .with_execution_provider(ExecutionProvider::Cpu);
 
     let mut model = Nemotron::from_pretrained("./nemotron", Some(config))?;
@@ -157,8 +169,8 @@ fn run_inference_loop(
     // --- Silence Detection State ---
     let mut silent_chunks = 0;
     let mut needs_newline = false;
-    const SILENCE_THRESHOLD: f32 = 0.05;
-    const CHUNKS_FOR_NEWLINE: usize = 1;
+    const SILENCE_THRESHOLD: f32 = 0.05; // Tune this: lower = more sensitive to background noise
+    const CHUNKS_FOR_NEWLINE: usize = 1; // ~1.1 seconds of silence (2 * 560ms)
 
     loop {
         // Drain available samples into the buffer
@@ -166,6 +178,7 @@ fn run_inference_loop(
             audio_buffer.push(sample);
         }
 
+        // Process exactly CHUNK_SIZE samples at a time
         if audio_buffer.len() >= CHUNK_SIZE {
             let chunk: Vec<f32> = audio_buffer.drain(..CHUNK_SIZE).collect();
 
@@ -177,15 +190,19 @@ fn run_inference_loop(
                     needs_newline = true;
                 }
             } else {
-                silent_chunks = 0;
+                silent_chunks = 0; // Reset if speech is detected
             }
 
+            // Perform cache-aware transcription on the chunk
             if let Ok(text) = model.transcribe_chunk(&chunk) {
                 if !text.is_empty() {
                     if needs_newline {
+                        // Check if the new chunk actually contains words, or just leftover punctuation/spaces
                         let has_alphanumeric = text.chars().any(|c| c.is_alphanumeric());
 
                         if !has_alphanumeric {
+                            // It's JUST leftover punctuation (e.g. "." or " ?").
+                            // Attach it to the previous line and KEEP the newline pending for the next actual word.
                             completed_text.push_str(&text);
                         } else {
                             // The chunk contains words, but might start with punctuation (e.g. ". How are you")
