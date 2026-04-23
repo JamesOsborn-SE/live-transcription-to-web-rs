@@ -16,7 +16,7 @@ use tokio::sync::broadcast;
 use tokio_stream::StreamExt;
 use tokio_stream::wrappers::BroadcastStream;
 use tower_http::cors::CorsLayer;
-use ort::ep::{OpenVINO, ArbitrarilyConfigurableExecutionProvider};
+use ort::ep::{OpenVINO};
 
 // --- Configuration Constants ---
 const SAMPLE_RATE: u32 = 16000;
