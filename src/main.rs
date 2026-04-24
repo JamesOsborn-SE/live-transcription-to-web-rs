@@ -155,8 +155,6 @@ fn run_inference_loop(
                 .build();
 
             let configured_builder = builder.with_execution_providers([ov_ep])?;
-
-            // 2. Return the successfully configured builder wrapped in Ok()
             Ok(configured_builder)
         })
         .with_execution_provider(ExecutionProvider::Cpu);
@@ -164,13 +162,16 @@ fn run_inference_loop(
     let mut model = Nemotron::from_pretrained("./nemotron", Some(config))?;
 
     let mut audio_buffer = Vec::with_capacity(CHUNK_SIZE * 2);
-    let mut completed_text = String::new();
+
+    // --- The Two Buffers ---
+    let mut history_text = String::new(); // Feeds the #completed-box
+    let mut current_sentence = String::new(); // Feeds the #active-box
 
     // --- Silence Detection State ---
     let mut silent_chunks = 0;
     let mut needs_newline = false;
-    const SILENCE_THRESHOLD: f32 = 0.05; // Tune this: lower = more sensitive to background noise
-    const CHUNKS_FOR_NEWLINE: usize = 1; // ~1.1 seconds of silence (2 * 560ms)
+    const SILENCE_THRESHOLD: f32 = 0.05;
+    const CHUNKS_FOR_NEWLINE: usize = 1;
 
     loop {
         // Drain available samples into the buffer
@@ -194,48 +195,73 @@ fn run_inference_loop(
             }
 
             // Perform cache-aware transcription on the chunk
+            let mut text_emitted = false;
             if let Ok(text) = model.transcribe_chunk(&chunk) {
                 if !text.is_empty() {
-                    if needs_newline {
-                        // Check if the new chunk actually contains words, or just leftover punctuation/spaces
-                        let has_alphanumeric = text.chars().any(|c| c.is_alphanumeric());
+                    current_sentence.push_str(&text);
+                    text_emitted = true;
+                }
+            }
 
-                        if !has_alphanumeric {
-                            // It's JUST leftover punctuation (e.g. "." or " ?").
-                            // Attach it to the previous line and KEEP the newline pending for the next actual word.
-                            completed_text.push_str(&text);
-                        } else {
-                            // The chunk contains words, but might start with punctuation (e.g. ". How are you")
-                            // Let's split off any leading punctuation/spaces
-                            let first_alpha_idx = text.find(|c: char| c.is_alphanumeric()).unwrap();
-                            let (leading_punc, rest) = text.split_at(first_alpha_idx);
+            // We evaluate the buffers if new text arrived OR if we might need to flush due to a pause
+            let mut ui_needs_update = text_emitted;
 
-                            // Attach the lingering punctuation to the previous line
-                            completed_text.push_str(leading_punc);
+            if !current_sentence.is_empty() {
+                loop {
+                    let mut split_idx = None;
+                    let chars: Vec<(usize, char)> = current_sentence.char_indices().collect();
 
-                            // Insert the paragraph break (but avoid doing it at the very start of the doc)
-                            if !completed_text.trim().is_empty()
-                                && !completed_text.ends_with("\n\n")
-                            {
-                                completed_text.push_str("\n");
+                    for i in 0..chars.len() {
+                        let (idx, c) = chars[i];
+                        if c == '.' || c == '?' || c == '!' {
+                            // Boundary condition 1: Punctuation followed by a space (continuous speech)
+                            let followed_by_space =
+                                i + 1 < chars.len() && chars[i + 1].1.is_whitespace();
+
+                            // Boundary condition 2: Punctuation at the end of the buffer when the user pauses
+                            let end_with_pause = i + 1 == chars.len() && needs_newline;
+
+                            if followed_by_space || end_with_pause {
+                                split_idx = Some(idx + c.len_utf8());
+                                break;
                             }
-
-                            // Append the actual words
-                            completed_text.push_str(rest);
-                            needs_newline = false; // We successfully inserted the newline
                         }
+                    }
+
+                    if let Some(idx) = split_idx {
+                        // 1. Slice exactly at the punctuation mark, preserving all spaces
+                        let completed_sentence = &current_sentence[..idx];
+                        
+                        history_text.push_str(completed_sentence);
+
+                        if needs_newline {
+                            // 2. If triggered by a pause, break the paragraph
+                            history_text.push_str("\n");
+                            // Strip leading spaces for the new paragraph so it sits flush
+                            current_sentence = current_sentence[idx..].trim_start().to_string();
+                        } else {
+                            // 3. Continuous speech: keep the natural space in the active buffer
+                            current_sentence = current_sentence[idx..].to_string();
+                        }
+
+                        needs_newline = false; // Reset since we successfully flushed
+                        ui_needs_update = true; // State changed, tell the frontend
                     } else {
-                        completed_text.push_str(&text);
+                        break; // No more complete sentences found
                     }
+                }
+            }
 
-                    let payload = serde_json::json!({
-                        "completed": completed_text,
-                    })
-                    .to_string();
+            // Only fire the SSE payload to the frontend if something actually changed
+            if ui_needs_update {
+                let payload = serde_json::json!({
+                    "active": current_sentence,
+                    "completed": history_text,
+                })
+                .to_string();
 
-                    if tx.receiver_count() > 0 {
-                        let _ = tx.send(payload);
-                    }
+                if tx.receiver_count() > 0 {
+                    let _ = tx.send(payload);
                 }
             }
         } else {
